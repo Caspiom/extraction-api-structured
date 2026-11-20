@@ -15,13 +15,14 @@ Esta versão **não usa LLM**. É um extrator por regex/rótulos, escolhido para
 ## Como rodar (< 5 min)
 ```bash
 make setup   # venv + dependências
-make all     # 21 testes + eval
-make run     # API em http://127.0.0.1:8000  (docs em /docs)
+make all     # 45 testes + eval
+export EXTRACTION_API_KEYS=$(openssl rand -hex 16)   # sem isso o /extract responde 503 (falha fechada)
+make run     # API em http://127.0.0.1:8000  (docs em /docs); dev sem chave: AUTH_DISABLED=1
 # ou Docker:
-make docker-build && make docker-run
+make docker-build && docker run --rm -p 8000:8000 -e EXTRACTION_API_KEYS=$EXTRACTION_API_KEYS extraction-api-structured
 ```
 ```bash
-curl -s -X POST localhost:8000/extract -H 'content-type: application/json' \
+curl -s -X POST localhost:8000/extract -H 'content-type: application/json' -H "x-api-key: $EXTRACTION_API_KEYS" \
   -d '{"text":"NF-e nº 123\nEmitente: Mar Azul LTDA\nCNPJ: 11.222.333/0001-81\nData de emissão: 03/11/2026\nValor total: R$ 1.234,56"}'
 # {"status":"ok","data":{"numero":"123","emitente":"Mar Azul LTDA","cnpj":"11.222.333/0001-81",
 #   "data_emissao":"2026-11-03","valor_total":"1234.56"},"errors":[]}
@@ -43,14 +44,16 @@ Dois conjuntos: **dev** (12, usados para escrever as regras) e **test** (24, esc
 - **Limites desta medição:** 36 casos escritos por mim, em texto limpo. Não há PDF nem OCR; nada aqui diz como se sai em notas reais, com ruído e layouts que eu não imaginei. A latência do extrator é desprezível (≈ 0,06 ms, p50) por ser regra; **não é uma medida de latência de LLM**.
 
 ## Validação dos testes (mutação)
-Quebrei o código de propósito, 10 mutantes: sem checagem de ambiguidade, CNPJ de qualquer parte, aceitar moeda estrangeira, sem dígito verificador, valor 0 passando, ignorar sinal negativo, entre outros. **Os testes pegaram os 10**; o eval pegou 8 (ele não pega, por exemplo, a regressão que descarta o erro do Pydantic ao montar o motivo). Um 11º mutante, o filtro de `vencimento`, sobreviveu a tudo: era **código morto** (linha de vencimento já não tem rótulo de emissão). Removi o código e escrevi um teste do caso real (emissão e vencimento na mesma linha → recusa por ambiguidade).
+Quebrei o código de propósito, 10 mutantes (e mais 20 na camada de segurança, ver abaixo): sem checagem de ambiguidade, CNPJ de qualquer parte, aceitar moeda estrangeira, sem dígito verificador, valor 0 passando, ignorar sinal negativo, entre outros. **Os testes pegaram os 10**; o eval pegou 8 (ele não pega, por exemplo, a regressão que descarta o erro do Pydantic ao montar o motivo). Um 11º mutante, o filtro de `vencimento`, sobreviveu a tudo: era **código morto** (linha de vencimento já não tem rótulo de emissão). Removi o código e escrevi um teste do caso real (emissão e vencimento na mesma linha → recusa por ambiguidade).
 
 ## Decisões e limites conhecidos
 - **Só BRL.** `USD 100.00` recusa com motivo. Valor sem `R$` (ex.: `TOTAL: 1234,50`) é assumido como BRL.
 - **Data só na linha do rótulo de emissão.** Data em linha separada do rótulo (`Emissão:\n03/11/2026`) não é lida e recusa. Vencimento nunca vira emissão.
 - **CNPJ do emitente x de outra parte:** cada CNPJ é atribuído ao rótulo de parte mais próximo (emitente x destinatário/tomador/cliente). Só o CNPJ do cliente → recusa.
 - **Layout sem rótulo de emitente:** usa a linha acima do CNPJ como nome (heurística frágil, coberta por 1 caso).
-- **Sem autenticação nem limite de requisições.** É um estudo; para exposição pública falta isso.
+- **Segurança de acesso (`src/seguranca.py`, 25 testes, 20 mutantes):** chave de API em `X-API-Key` (`EXTRACTION_API_KEYS`, separadas por vírgula, mínimo 16 caracteres), comparada em tempo constante; **sem chave configurada o `/extract` responde 503** (falha fechada; dev local exige `AUTH_DISABLED=1` exato). Limite por chave em janela deslizante (`RATE_LIMIT_PER_MIN`, padrão 30) com `Retry-After`; tentativas com chave inválida têm freio próprio por cliente (`AUTH_FAIL_PER_MIN`, padrão 10) e **não gastam a cota da chave válida**; corpo > 100 KB dá 413 (também em upload em chunks). `/health` fica aberto para o healthcheck. Verificado no Docker: 401 sem chave, 200 com chave, 429 na 4ª com limite 3, 413 com 150 KB, 503 sem configuração.
+- **Limites dessa camada:** estado de limite em memória e por processo (com N workers/réplicas o limite efetivo é N vezes); sem rotação de chave, sem TLS (precisa de proxy na frente), sem identificar o cliente por IP real atrás de proxy (o freio de força bruta usa o IP da conexão, que atrás de proxy é o do proxy); JSON malformado sem chave ainda recebe 422 antes do 401 (o FastAPI lê o corpo antes das dependências); chave só se prova por teste, não passou por revisão de segurança externa.
+- **Achado no caminho:** a 1ª versão checava o tamanho do corpo em `Depends`, e o teste mostrou que não impedia a leitura (o FastAPI lê o corpo antes das dependências, e engole exceções de leitura como 400). Virou middleware ASGI.
 - **Docker:** build e execução verificados (imagem 196 MB, usuário não-root, `/health` e healthcheck `healthy`). Não testei em outra máquina nem em nuvem.
 
 ## Estrutura

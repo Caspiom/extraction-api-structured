@@ -1,13 +1,14 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import CHAVE
 from src.app import app
 from src.extractor import extrair
 from src.schemas import NotaFiscal, cnpj_valido
 
 OK = "11.222.333/0001-81"
 BASE = f"NF-e nº 123\nEmitente: Mar Azul LTDA\nCNPJ: {OK}\nData de emissão: 03/11/2026\nValor total: R$ 1.234,56"
-client = TestClient(app)
+client = TestClient(app, headers={"x-api-key": CHAVE})
 
 
 def erros(txt):
